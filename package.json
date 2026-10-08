@@ -1,12 +1,13 @@
 {
-  "name": "forces-instrument-u3",
+  "name": "bahia-servida-u7",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verificar": "node verificar.mjs"
   },
   "dependencies": {
     "three": "0.185.1"

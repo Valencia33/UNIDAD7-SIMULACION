@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BAHÍA — Servida como se merece</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;1,500&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;height:100%;background:#0b0805;overflow:hidden;color:#f3e6c8;font-family:Inter,system-ui,sans-serif}
+canvas{display:block;touch-action:none}
+#note{position:absolute;transform:translateX(-50%);width:min(420px,90vw);text-align:center;font:italic 500 20px/1.25 'Cormorant Garamond',serif;pointer-events:none;opacity:0;transition:opacity .6s}
+#note b{display:block;margin-bottom:2px;font:600 10px/1.6 Inter,sans-serif;font-style:normal;letter-spacing:.16em;text-transform:uppercase;color:#d9a441}
+#hint{position:absolute;bottom:28px;width:100%;text-align:center;font-size:12px;letter-spacing:.16em;text-transform:uppercase;opacity:.7;pointer-events:none;transition:opacity .6s}
+#end{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:10vh 16px 16px;text-align:center;background:linear-gradient(#0b0805f2 25%,#0b080500 45%);opacity:0;pointer-events:none;transition:opacity 1.2s}
+#end.on{opacity:1;pointer-events:auto}
+#end h1{margin:0 0 12px;font:500 clamp(28px,5vw,56px)/1.1 'Cormorant Garamond',serif}
+#end p{margin:4px 0;opacity:.8}
+#end button{margin-top:24px;padding:10px 22px;background:none;border:1px solid #d9a441;color:#f3e6c8;font:600 12px Inter,sans-serif;letter-spacing:.14em;text-transform:uppercase;cursor:pointer}
+#end small{position:absolute;bottom:16px;left:16px;right:16px;font-size:11px;opacity:.6}
+</style>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+</head><body>
+<div id="hint">Toca la lata para abrirla</div>
+<div id="note"></div>
+<div id="end">
+  <h1>La calidad ya estaba.<br><em>Solo faltaba servirla como premium.</em></h1>
+  <p id="score"></p>
+  <button id="again">Otra ronda</button>
+  <small>El exceso de alcohol es perjudicial para la salud. Prohíbase el expendio de bebidas embriagantes a menores de edad.</small>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { pour, grade, FINGER } from './modelo.js';
+
+const POUR_TILT = 2.0; // inclinación de la lata al servir (rad)
+
+const $ = id => document.getElementById(id);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.prepend(renderer.domElement);
+const canvas = renderer.domElement;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0b0805);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 100);
+
+// Contraluz cálido detrás de la palabra (opaco, para que el vidrio lo refracte)
+{
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const g = c.getContext('2d'), r = g.createRadialGradient(128, 128, 0, 128, 128, 128);
+  r.addColorStop(0, '#9a5a1c'); r.addColorStop(0.2, '#3a1f0a'); r.addColorStop(1, '#0b0805');
+  g.fillStyle = r; g.fillRect(0, 0, 256, 256);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const glow = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), new THREE.MeshBasicMaterial({ map: t }));
+  glow.position.set(0, 0.8, -4); scene.add(glow);
+}
+scene.add(new THREE.AmbientLight(0xffe6c0, 0.3));
+const key = new THREE.DirectionalLight(0xfff1dc, 2.2); key.position.set(3, 4, 5); scene.add(key);
+const rim = new THREE.DirectionalLight(0xffa640, 3); rim.position.set(-2, 3, -4); scene.add(rim);
+
+// ---- Letras: vidrio + cerveza (el líquido es la misma letra, recortada por nivel) ----
+const glassMat = new THREE.MeshPhysicalMaterial({ roughness: 0.05, transmission: 1, thickness: 0.35, ior: 1.5, clearcoat: 1 });
+const liquidMat = () => new THREE.ShaderMaterial({
+  side: THREE.DoubleSide,
+  uniforms: { uBottom: { value: 0 }, uHeight: { value: 1 }, uLevel: { value: 0 }, uFoam: { value: 0 }, uTilt: { value: 0 }, uCx: { value: 0 }, uTime: { value: 0 } },
+  vertexShader: `varying vec3 vW; varying vec3 vN;
+    void main(){ vec4 w = modelMatrix*vec4(position,1.); vW = w.xyz; vN = normalize(mat3(modelMatrix)*normal); gl_Position = projectionMatrix*viewMatrix*w; }`,
+  fragmentShader: `uniform float uBottom,uHeight,uLevel,uFoam,uTilt,uCx,uTime; varying vec3 vW; varying vec3 vN;
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453); }
+    void main(){
+      float y = (vW.y-uBottom)/uHeight + uTilt*(vW.x-uCx);
+      float top = uLevel + uFoam;
+      if (top < .001 || y > top) discard;
+      vec3 col = mix(vec3(.82,.42,.04), vec3(1.,.74,.2), smoothstep(-.1,1.,y));
+      vec2 q = vec2(vW.x*28., vW.y*28. - uTime*2.5), id = floor(q), f = fract(q)-.5;  // burbuja fina que sube
+      float r = hash(id); f.x += (r-.5)*.6;
+      col += (r > .82 ? smoothstep(.12,.05,length(f)) : 0.) * vec3(1.,.9,.6) * .8;
+      if (y > uLevel) col = vec3(1.,.95,.84) * (.85 + .15*hash(floor(vW.xy*60.)));
+      if (!gl_FrontFacing) col *= .9;
+      gl_FragColor = vec4(pow(col*(.75 + .25*max(vN.y,0.)), vec3(2.2)), 1.);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`
+});
+
+const [font, fbx] = await Promise.all([
+  new FontLoader().loadAsync('https://cdn.jsdelivr.net/npm/three@0.160.0/examples/fonts/helvetiker_bold.typeface.json'),
+  new FBXLoader().loadAsync('rig_cerveza.fbx'),
+]);
+
+const SIZE = 1.1, DEPTH = 0.38, GAP = 0.16;
+const text = (ch, bevel) => new TextGeometry(ch, { font, size: SIZE, height: bevel ? DEPTH : DEPTH - 0.08, curveSegments: 8,
+  bevelEnabled: bevel, bevelThickness: 0.04, bevelSize: 0.035, bevelSegments: 3 });
+
+const glasses = [];
+for (const ch of ['B', 'A', 'H', 'A']) {
+  const geoL = text(ch, false), geoG = text(ch, true);
+  geoL.computeBoundingBox();
+  const { min, max } = geoL.boundingBox;
+  geoL.translate(-min.x, -min.y, -DEPTH / 2 + 0.04);
+  geoG.translate(-min.x, -min.y, -DEPTH / 2);
+  const group = new THREE.Group(), liquid = new THREE.Mesh(geoL, liquidMat());
+  group.add(liquid, new THREE.Mesh(geoG, glassMat)); scene.add(group);
+  glasses.push({ group, u: liquid.material.uniforms, w: max.x - min.x, h: max.y - min.y,
+    level: 0, foam: 0, done: false, slosh: 0, sloshV: 0 });
+}
+const capH = glasses[0].h;
+
+// ---- La lata (tu rig) es la Í; la anilla abierta hace de tilde ----
+const CAN_H = capH * 1.12, s = CAN_H / 320.2, CAN_W = 191 * s;
+fbx.scale.setScalar(s); fbx.position.y = -CAN_H / 2;
+fbx.rotation.y = Math.PI / 2; // así la anilla abierta se ve de perfil, inclinada como una tilde
+const body = new THREE.MeshStandardMaterial({ color: 0xd8d2c4, metalness: 0.9, roughness: 0.28 });
+const alu = new THREE.MeshStandardMaterial({ color: 0xa0a0a0, metalness: 1, roughness: 0.35 });
+const bones = {};
+fbx.traverse(n => {
+  if (n.isMesh) { n.frustumCulled = false; n.material = Array.isArray(n.material) ? n.material.map(m => m.name === 'Cerveza' ? body : alu) : alu; }
+  if (n.isBone && !bones[n.name]) bones[n.name] = n;  // FBXLoader duplica huesos por malla; el primero manda
+});
+const pivot = new THREE.Group(); pivot.add(fbx); scene.add(pivot);
+const hit = new THREE.Mesh(new THREE.BoxGeometry(CAN_W, CAN_H, CAN_W), new THREE.MeshBasicMaterial({ visible: false }));
+pivot.add(hit);
+const mouthLocal = new THREE.Vector3(0, CAN_H / 2, 0);
+
+const DEF = ['DEF_01', 'DEF_02', 'DEF_03', 'DEF_04', 'DEF_05'].map(n => bones[n]);
+const defBase = DEF[0].position.clone(), SEG = DEF[1].position.y - DEF[0].position.y;
+function bend(a) { // curva total "a" repartida en los 5 segmentos del rig
+  const p = defBase.clone();
+  DEF.forEach((b, i) => {
+    const th = a * (i + 1) / DEF.length;
+    b.position.copy(p); b.rotation.x = th;
+    p.z += Math.sin(th) * SEG; p.y += Math.cos(th) * SEG;
+  });
+}
+const opener = bones.DEF_opener, openerRest = opener.rotation.x, OPEN_ANGLE = -0.9;
+
+// ---- Composición: B A H [lata] A ----
+const widths = [glasses[0].w, glasses[1].w, glasses[2].w, CAN_W, glasses[3].w];
+const total = widths.reduce((a, b) => a + b) + GAP * 4;
+let x = -total / 2;
+const home = new THREE.Vector3();
+widths.forEach((w, i) => {
+  if (i === 3) home.set(x + w / 2, CAN_H / 2, 0);
+  else { const g = glasses[i > 3 ? 3 : i]; g.group.position.x = x; g.cx = x + w / 2; g.u.uCx.value = g.cx; g.u.uHeight.value = g.h; }
+  x += w + GAP;
+});
+pivot.position.copy(home);
+
+function fit() {
+  const aspect = innerWidth / innerHeight, tan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const dist = Math.max(3.4 / 2 / tan, total * 1.3 / 2 / (tan * aspect));
+  camera.aspect = aspect; camera.position.set(0, 1.0 + dist * 0.15, dist); camera.lookAt(0, 1.0, 0);
+  camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight);
+}
+addEventListener('resize', fit); fit();
+
+// ---- Interacción ----
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), p = new THREE.Vector3();
+const target = new THREE.Vector3(), grab = new THREE.Vector3();
+let opened = false, open = 0, drag = false;
+function setRay(e) { ndc.set(e.clientX / innerWidth * 2 - 1, -e.clientY / innerHeight * 2 + 1); ray.setFromCamera(ndc, camera); }
+canvas.addEventListener('pointerdown', e => {
+  setRay(e);
+  if (!ray.intersectObject(hit).length) return;
+  if (!opened) { opened = true; return; }
+  drag = true; canvas.setPointerCapture(e.pointerId);
+  ray.ray.intersectPlane(plane, p); grab.copy(pivot.position).sub(p); target.copy(pivot.position);
+});
+canvas.addEventListener('pointermove', e => {
+  setRay(e);
+  if (drag) { ray.ray.intersectPlane(plane, p); target.copy(p).add(grab); target.y = Math.max(target.y, CAN_H / 2); }
+  canvas.style.cursor = drag ? 'grabbing' : ray.intersectObject(hit).length ? (opened ? 'grab' : 'pointer') : '';
+});
+canvas.addEventListener('pointerup', () => drag = false);
+
+const stream = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.03, 1, 10).translate(0, -0.5, 0),
+  new THREE.MeshStandardMaterial({ color: 0xf0a020, emissive: 0x6a3000, roughness: 0.2 }));
+stream.visible = false; scene.add(stream);
+
+// ---- Física: resortes (cap. 3) para posición, inclinación y flexión de la lata ----
+const vel = new THREE.Vector3();
+let tilt = 0, tiltV = 0, bendA = 0, bendV = 0, perfect = 0, served = 0, endAt = 0;
+const glassAt = (gx, gy) => glasses.find(g => !g.done && Math.abs(gx - g.cx) < g.w * 0.3 && gy > g.h + 0.02);
+const spring = (x, v, goal, k, c, dt) => v + (k * (goal - x) - c * v) * dt;
+
+function evaluate(g) {
+  g.done = true; served++;
+  const verdict = grade(g.foam), fingers = (g.foam / FINGER).toLocaleString('es-CO', { maximumFractionDigits: 1 });
+  if (verdict === 'perfecta') perfect++;
+  $('note').innerHTML = '<b>Dorado brillante · burbuja fina</b>' + {
+    plana: 'Casi sin espuma. Sirve desde más arriba.',
+    espumosa: `${fingers} dedos de espuma. Acércate más al vaso.`,
+    perfecta: `${fingers} dedos de espuma. Servido perfecto.`,
+  }[verdict];
+  $('note').style.opacity = 1;
+  if (served === glasses.length) endAt = clock.elapsedTime + 2;
+}
+$('again').onclick = () => {
+  glasses.forEach(g => Object.assign(g, { level: 0, foam: 0, done: false }));
+  $('note').style.opacity = 0;
+  perfect = served = endAt = 0; $('end').classList.remove('on');
+};
+
+const clock = new THREE.Clock(), v2 = new THREE.Vector3();
+renderer.setAnimationLoop(() => {
+  const dt = Math.min(clock.getDelta(), 1 / 30), t = clock.elapsedTime;
+  const goal = drag ? target : home;
+
+  vel.addScaledVector(v2.subVectors(goal, pivot.position), 140 * dt).multiplyScalar(1 - 16 * dt);
+  pivot.position.addScaledVector(vel, dt);
+
+  const mx = goal.x - Math.sin(POUR_TILT) * CAN_H / 2, my = goal.y + Math.cos(POUR_TILT) * CAN_H / 2;
+  tiltV = spring(tilt, tiltV, drag && opened && glassAt(mx, my) ? POUR_TILT : 0, 60, 11, dt); tilt += tiltV * dt;
+  pivot.rotation.z = tilt;
+  bendV = spring(bendA, bendV, THREE.MathUtils.clamp(-vel.x * 0.12, -0.5, 0.5), 90, 7, dt); bendA += bendV * dt;
+  bend(bendA);
+  open += ((opened ? 1 : 0) - open) * Math.min(1, 8 * dt);
+  opener.rotation.x = openerRest + open * OPEN_ANGLE;
+  opener.scale.setScalar(1 + 0.8 * open); // tilde exagerada para que se lea
+
+  stream.visible = false;
+  if (opened && tilt > 1.6) {
+    pivot.updateMatrixWorld();
+    const m = pivot.localToWorld(mouthLocal.clone());
+    const g = glassAt(m.x, m.y);
+    let floorY = 0;
+    if (g) {
+      if (pour(g, m.y - g.h, dt)) evaluate(g); // lleno: la lata se endereza sola
+      g.sloshV += (Math.random() - 0.5) * 40 * dt;
+      floorY = (g.level + g.foam) * g.h;
+    }
+    stream.visible = true; stream.position.copy(m); stream.scale.y = Math.max(m.y - floorY, 0.01);
+  }
+
+  for (const g of glasses) {
+    g.sloshV = spring(g.slosh, g.sloshV, 0, 40, 2.5, dt); g.slosh += g.sloshV * dt;
+    g.u.uLevel.value = g.level; g.u.uFoam.value = g.foam; g.u.uTilt.value = g.slosh; g.u.uTime.value = t;
+  }
+  v2.set(0, -0.15, 0).project(camera);
+  $('note').style.left = (v2.x + 1) / 2 * innerWidth + 'px'; $('note').style.top = (1 - v2.y) / 2 * innerHeight + 'px';
+
+  $('hint').textContent = !opened ? 'Toca la lata para abrirla' : 'Arrastra la lata sobre un vaso para servir';
+  $('hint').style.opacity = served ? 0 : 0.7;
+  if (endAt && t > endAt) { $('score').textContent = `Servidos perfectos: ${perfect} de ${glasses.length}`; $('end').classList.add('on'); endAt = 0; }
+
+  renderer.render(scene, camera);
+});
+</script></body></html>
