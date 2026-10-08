@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dumbest Girl Alive - Physarum Performance</title>
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="status" class="status-flash"></div>
+
+  <div id="ui-layer">
+    <h1>Dumbest Girl Alive</h1>
+    <p class="sub">A live instrument made of one million slime-mould agents and thirty flocking guides.</p>
+
+    <div class="cols">
+      <section>
+        <h2>Agents</h2>
+        <p><span class="key">1</span><span class="key">2</span><span class="key">3</span><span class="key">4</span> change how they sense and move</p>
+        <p><span class="key">Q</span> implode <span class="key">W</span> explode <span class="key">E</span> vortex &mdash; tap, or hold to sustain</p>
+        <p><span class="key">R</span> scatter and respawn</p>
+        <p><span class="key">F</span> hold: they steer along a flow field</p>
+        <p><span class="key">V</span> toggle inertia (fast, nearly straight)</p>
+
+        <h2>Pointer</h2>
+        <p><span class="key">Hold click</span> the flock follows your cursor</p>
+        <p><span class="key">Wheel</span> how far agents see</p>
+        <p><span class="key">Shift</span> + <span class="key">Wheel</span> how long trails last</p>
+      </section>
+
+      <section>
+        <h2>Look</h2>
+        <p><span class="key">C</span> next palette, <span class="key">Shift</span> + <span class="key">C</span> previous</p>
+        <p><span class="key">A</span> bass punch</p>
+        <p><span class="key">S</span> flash invert</p>
+        <p><span class="key">D</span> chromatic aberration</p>
+        <p><span class="key">Space</span> glitch, hold to sustain</p>
+
+        <h2>Lyrics Punch</h2>
+        <p><span class="key">T</span><span class="key">Y</span> TEXT / CRY</p>
+        <p><span class="key">J</span><span class="key">K</span><span class="key">L</span> DUMBEST / GIRL / ALIVE</p>
+        <p><span class="key">M</span> toggle text mode (solid red vs mask cutout)</p>
+
+        <h2>Show</h2>
+        <p><span class="key">Enter</span> start the track and go fullscreen</p>
+        <p><span class="key">P</span> pause/play | <span class="key">0</span> restart</p>
+        <p><span class="key">&larr;</span> / <span class="key">&rarr;</span> seek -5s / +5s</p>
+        <p><span class="key">H</span> show or hide this panel</p>
+        <p class="note">Colour shows which axis an agent is travelling on. Invert and glitch strobe: use them sparingly.</p>
+      </section>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

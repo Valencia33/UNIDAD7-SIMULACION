@@ -1,0 +1,134 @@
+:root {
+  --pink: #ff2bd6;
+  --cyan: #00e5ff;
+  --lime: #c8ff00;
+  --ink: #07000f;
+  --font: "Arial Rounded MT Bold", "Trebuchet MS", "Segoe UI", Verdana, sans-serif;
+}
+
+body, html {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background-color: #000;
+  color: #fff;
+  font-family: var(--font);
+  user-select: none;
+}
+
+body.idle { cursor: none; }
+
+#app {
+  width: 100vw;
+  height: 100vh;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+}
+
+#ui-layer {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 10;
+  width: min(880px, 92vw);
+  max-height: 92vh;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 28px 36px 24px;
+  background: rgba(7, 0, 15, 0.86);
+  border: 2px solid var(--pink);
+  border-radius: 18px;
+  box-shadow: 0 0 0 2px var(--ink), 0 0 36px rgba(255, 43, 214, 0.35), 8px 8px 0 var(--cyan);
+  transition: opacity 0.5s ease, visibility 0s;
+  pointer-events: none;
+}
+
+#ui-layer.hidden {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.5s ease, visibility 0s 0.5s;
+}
+
+h1 {
+  margin: 0 0 6px;
+  font-size: clamp(30px, 5vw, 52px);
+  line-height: 1;
+  letter-spacing: -0.5px;
+  background: linear-gradient(90deg, var(--pink), var(--cyan) 55%, var(--lime));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.sub {
+  margin: 0 0 20px;
+  font-size: 14px;
+  color: #c9b6d9;
+}
+
+.cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 36px;
+}
+
+h2 {
+  margin: 14px 0 6px;
+  font-size: 15px;
+  font-weight: normal;
+  color: var(--lime);
+}
+
+section p {
+  margin: 0 0 6px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: #d8cce6;
+}
+
+.note {
+  margin-top: 12px;
+  color: #ff9bea;
+}
+
+.key {
+  display: inline-block;
+  min-width: 18px;
+  margin-right: 4px;
+  padding: 1px 7px;
+  text-align: center;
+  color: #fff;
+  background: #1c0a2b;
+  border: 1px solid var(--cyan);
+  border-radius: 6px;
+  box-shadow: 0 2px 0 var(--cyan);
+}
+
+.status-flash {
+  position: absolute;
+  top: 22px;
+  right: 26px;
+  z-index: 20;
+  font-size: clamp(20px, 2.6vw, 34px);
+  color: #fff;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  text-shadow: 0 0 14px var(--pink), 0 0 30px var(--pink), 2px 2px 0 var(--ink);
+  opacity: 0;
+  transform: translateY(-8px) scale(1.08);
+  transition: opacity 0.14s ease, transform 0.28s cubic-bezier(0.2, 1.6, 0.4, 1);
+  pointer-events: none;
+}
+
+.status-flash.on {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+@media (max-width: 720px) {
+  .cols { grid-template-columns: 1fr; }
+}
