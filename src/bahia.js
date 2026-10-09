@@ -4,13 +4,16 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { toCreasedNormals } from 'three/addons/utils/BufferGeometryUtils.js';
 import { FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
-import { emitir, grade, FULL } from './modelo.js';
-import { createFluid, MOUTH } from './fluido.js';
+import { emitir, grade, FULL, foamShare, FOAM_EXPANSION } from './modelo.js';
+import { createFluid, MOUTH, G } from './fluido.js';
 import { createBeach, waveReach, SHORE, WAKES } from './playa.js';
 import { createActor } from './personaje.js';
 import { createSound } from './sonido.js';
 
 const POUR_TILT = 2.0; // inclinación de la lata al servir (rad)
+const POUR_SPEED = 1.5; // velocidad con que el chorro sale por la boca (alturas de letra / s)
+// ¿servir desde esta altura deja el vaso perfecto? La misma cuenta del modelo: qué parte del vaso lleno sería espuma
+const sweet = h => { const s = foamShare(h), f = s * FOAM_EXPANSION / (1 - s + s * FOAM_EXPANSION); return grade(f * FULL) === 'perfecta'; };
 const GAP = 0.06;      // aire a cada lado de la lata dentro de la palabra
 const CORNER = Math.PI / 3; // en el contorno de las letras, un giro mayor a 60° es esquina y se queda filoso
 const BEVEL = 3;       // bisel de las letras, en unidades del FBX (la palabra mide ~256 de alto)
@@ -19,6 +22,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.6;
+renderer.transmissionResolutionScale = 0.5; // lo que se ve a través del vidrio ya llega borroso: media resolución basta
 document.body.prepend(renderer.domElement);
 const canvas = renderer.domElement;
 const scene = new THREE.Scene();
@@ -130,7 +134,7 @@ const iIdx = pieces.reduce((m, g, i) => (g.boundingBox.max.x - g.boundingBox.min
 // ---- Vidrio con dispersión: separa la luz del sol en colores ----
 const dropsGlass = drops.clone(); dropsGlass.repeat.set(3, 3);
 const glassMat = new THREE.MeshPhysicalMaterial({ roughness: 0.02, transmission: 1, thickness: 0.3, ior: 1.5, dispersion: 8,
-  attenuationColor: 0xffb347, attenuationDistance: 0.6, clearcoat: 1, iridescence: 0.3, iridescenceIOR: 1.3,
+  attenuationColor: 0xffb347, attenuationDistance: 0.3, clearcoat: 1, iridescence: 0.3, iridescenceIOR: 1.3,
   normalMap: dropsGlass, normalScale: new THREE.Vector2(0.2, 0.2) }); // vidrio frío: gotas que desvían la luz
 // El líquido de cada letra se pinta donde el campo del fluido (las gotas de fluido.js, ya difuminadas) dice que hay cerveza.
 // La espuma es la franja de arriba: la cerveza quieta (rojo) que tiene aire libre a menos de uFoamH por encima.
@@ -241,13 +245,72 @@ pieces.forEach((geo, i) => {
   if (i === iIdx) return;
   const { min, max } = geo.boundingBox, group = new THREE.Group(), liquid = new THREE.Mesh(inset(geo, 0.02), liquidMat());
   group.position.x = center + (i > iIdx ? shift : 0);
-  const glass = new THREE.Mesh(geo, glassMat); glass.castShadow = true;
+  const glass = new THREE.Mesh(geo, glassMat.clone()); glass.castShadow = true;
+  glass.material.emissive.set(0xffb52e); glass.material.emissiveIntensity = 0; // se enciende cuando sirves a la altura justa
   group.add(liquid, glass); scene.add(group);
-  glasses.push({ u: liquid.material.uniforms, h: max.y - min.y, cx: group.position.x + (min.x + max.x) / 2,
+  glasses.push({ glass: glass.material, glow: 0, u: liquid.material.uniforms, h: max.y - min.y, cx: group.position.x + (min.x + max.x) / 2,
     x0: group.position.x + min.x, x1: group.position.x + max.x, done: false, perfect: false,
     loops: geo.userData.loops.map(L => L.map(v => ({ x: v.x + group.position.x, y: v.y }))) });
 });
 const front = pieces[0].boundingBox.max.z;
+
+// ---- La lata no atraviesa la arena ni el vidrio ----
+// Su silueta sale de los huesos del rig (siguen la curva, el estirón y las inclinaciones): el eje pasa por
+// DEF_01..05 y la tapa, y a cada lado está el radio de la lata. Sus extremos son planos, como la lata.
+const AXIS = [...DEF, bone('DEF_lid')], CLEAR = 0.03; // aire mínimo entre la lata y una letra
+const ax = AXIS.map(() => new THREE.Vector3()), tmp = new THREE.Vector3(), edge = { d: 0, nx: 0, ny: 0 };
+function readAxis() { pivot.updateMatrixWorld(true); AXIS.forEach((b, i) => b.getWorldPosition(ax[i])); }
+const radius = () => CAN_W / 2 * actor.scale.x;
+function groundGap() { // altura del borde más bajo de la lata sobre la arena (negativa = se mete)
+  let low = Infinity;
+  for (const [a, b] of [[0, 1], [ax.length - 1, ax.length - 2]]) { // el punto más bajo está en el aro de la base o en el de la tapa
+    tmp.subVectors(ax[b], ax[a]).normalize();
+    low = Math.min(low, ax[a].y - radius() * Math.sqrt(Math.max(0, 1 - tmp.y * tmp.y)));
+  }
+  return low;
+}
+function nearestEdge(g, x, y) { // distancia con signo al contorno de la letra (negativa adentro) y la normal hacia afuera
+  let best = Infinity, nx = 0, ny = 0, inside = false;
+  for (const L of g.loops) for (let i = 0, j = L.length - 1; i < L.length; j = i++) {
+    const a = L[j], b = L[i], ex = b.x - a.x, ey = b.y - a.y;
+    if ((a.y > y) !== (b.y > y) && x < a.x + ex * (y - a.y) / ey) inside = !inside;
+    const t = Math.max(0, Math.min(1, ((x - a.x) * ex + (y - a.y) * ey) / (ex * ex + ey * ey)));
+    const dx = x - a.x - ex * t, dy = y - a.y - ey * t, d = dx * dx + dy * dy;
+    if (d < best) { best = d; nx = dx; ny = dy; }
+  }
+  const d = Math.sqrt(best) || 1e-6, s = inside ? -1 : 1;
+  edge.d = s * d; edge.nx = s * nx / d; edge.ny = s * ny / d;
+}
+// El empuje más fuerte que necesita la lata para quedar a CLEAR del vidrio; devuelve cuánto (0 = no toca)
+function letterPush(out) {
+  const r = radius(); let worst = 0;
+  out.set(0, 0, 0);
+  const keep = (depth, x, y) => { if (depth > worst) { worst = depth; out.set(x * depth, y * depth, 0); } };
+  const sample = (x, y) => { // un punto del borde de la lata dentro (o casi) de una letra
+    for (const g of glasses) {
+      if (x < g.x0 - CLEAR || x > g.x1 + CLEAR || y > g.h + CLEAR) continue;
+      nearestEdge(g, x, y);
+      if (edge.d < CLEAR) keep(CLEAR - edge.d, edge.nx, edge.ny);
+    }
+  };
+  const last = ax.length - 1;
+  for (let k = 0; k < last; k++) { // los dos costados, cada ~5 cm, y las dos tapas
+    const a = ax[k], b = ax[k + 1], l = Math.hypot(b.x - a.x, b.y - a.y) || 1, ux = (b.x - a.x) / l, uy = (b.y - a.y) / l;
+    for (let t = 0; t <= 1; t += 0.25) for (const side of [-1, 1]) sample(a.x + (b.x - a.x) * t - uy * r * side, a.y + (b.y - a.y) * t + ux * r * side);
+    if (k === 0 || k === last - 1) { const c = k === 0 ? a : b; for (let f = -1; f <= 1; f += 0.5) sample(c.x - uy * r * f, c.y + ux * r * f); }
+  }
+  for (const g of glasses) { // las esquinas de las letras que quedan dentro de la lata
+    if (g.x1 < Math.min(ax[0].x, ax[last].x) - r - CLEAR || g.x0 > Math.max(ax[0].x, ax[last].x) + r + CLEAR) continue;
+    for (const L of g.loops) for (const v of L) for (let k = 0; k < last; k++) {
+      const a = ax[k], b = ax[k + 1], ex = b.x - a.x, ey = b.y - a.y, t = ((v.x - a.x) * ex + (v.y - a.y) * ey) / (ex * ex + ey * ey);
+      if ((t < 0 && k === 0) || (t > 1 && k === last - 1) || t < -0.01 || t > 1.01) continue; // más allá de las tapas: afuera
+      const cx = a.x + ex * t - v.x, cy = a.y + ey * t - v.y, d = Math.hypot(cx, cy);
+      if (d < r + CLEAR) keep(r + CLEAR - d, d > 1e-6 ? cx / d : 0, d > 1e-6 ? cy / d : 1);
+    }
+  }
+  return worst;
+}
+
 beach.setWord(glasses.map(g => [g.x0, g.x1]), front);
 
 // ---- Huella de cada letra en la arena: donde el vidrio baja más que el agua que sube, frena la ola ----
@@ -279,24 +342,24 @@ const fluid = createFluid(glasses.map(g => ({ loops: g.loops, top: g.h })), regi
 const CAP = fluid.cap.reduce((a, b) => a + b) / fluid.cap.length; // gotas que llenan un vaso
 const splatGeo = new THREE.BufferGeometry();
 splatGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(fluid.X.length * 3), 3).setUsage(THREE.DynamicDrawUsage));
-splatGeo.setAttribute('kind', new THREE.BufferAttribute(new Float32Array(fluid.X.length * 3), 3).setUsage(THREE.DynamicDrawUsage));
+splatGeo.setAttribute('kind', new THREE.BufferAttribute(new Float32Array(fluid.X.length * 4), 4).setUsage(THREE.DynamicDrawUsage)); // alfa: espuma suelta
 splatGeo.setAttribute('vel', new THREE.BufferAttribute(new Float32Array(fluid.X.length * 2), 2).setUsage(THREE.DynamicDrawUsage));
 // la cerveza suelta se estira en la dirección en que cae (como un desenfoque de movimiento): las gotas seguidas forman un chorro continuo
 const splats = new THREE.Points(splatGeo, new THREE.ShaderMaterial({
   uniforms: { uSize: { value: 2 * SPLAT * FIELD_W / (region.x1 - region.x0) } },
-  vertexShader: `attribute vec3 kind; attribute vec2 vel; varying vec3 vK; varying vec2 vDir; varying float vLen; uniform float uSize;
+  vertexShader: `attribute vec4 kind; attribute vec2 vel; varying vec4 vK; varying vec2 vDir; varying float vLen; uniform float uSize;
     void main(){
       vK = kind; vLen = 1. + min(length(vel) * .3, 2.); vDir = length(vel) > 1e-4 ? normalize(vec2(vel.x, -vel.y)) : vec2(1., 0.);
       gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); gl_PointSize = uSize * vLen;
     }`,
-  fragmentShader: `varying vec3 vK; varying vec2 vDir; varying float vLen;
+  fragmentShader: `varying vec4 vK; varying vec2 vDir; varying float vLen;
     void main(){
       vec2 p = (gl_PointCoord*2.-1.) * vLen;
       float a = dot(p, vDir) / vLen, b = dot(p, vec2(-vDir.y, vDir.x)), r2 = a*a + b*b;
       if (r2 > 1.) discard;
-      gl_FragColor = vec4(vK*(1.-r2)*(1.-r2), 1.);
+      gl_FragColor = vK*(1.-r2)*(1.-r2);
     }`,
-  blending: THREE.AdditiveBlending, depthTest: false, depthWrite: false, transparent: true,
+  blending: THREE.CustomBlending, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, depthTest: false, depthWrite: false, transparent: true, // los cuatro canales se suman
 }));
 splats.frustumCulled = false;
 const fieldScene = new THREE.Scene().add(splats), fieldCam = new THREE.OrthographicCamera(region.x0, region.x1, region.y1, region.y0, -1, 1);
@@ -327,6 +390,8 @@ const spill = new THREE.Mesh(new THREE.PlaneGeometry(region.x1 - region.x0, regi
         float gx = texture2D(uField, uv + e).b - texture2D(uField, uv - e).b, gy = texture2D(uField, uv + e.yx).b - texture2D(uField, uv - e.yx).b;
         vec3 n = normalize(vec3(-gx, -gy, 1.5));
         vec3 col = mix(vec3(.95,.58,.1), vec3(.75,.36,.03), smoothstep(.6, 2.5, d)) * 1.15; // fuera del vidrio ámbar, la cerveza se ve más oscura
+        float froth = clamp(texture2D(uField, uv).a / max(d, 1e-3), 0., 1.); // servida desde muy alto, el chorro sale blanco de espuma
+        col = mix(col, vec3(1., .96, .86) * (.9 + .1*fract(sin(dot(floor(vW.xy*120.), vec2(12.9898, 78.233)))*43758.5453)), smoothstep(.15, .7, froth));
         col += pow(max(dot(n, normalize(vec3(-.4,.7,1.))), 0.), 24.) * vec3(1.,.9,.7) * .35;
         gl_FragColor = vec4(col, a * .9);
         #include <tonemapping_fragment>
@@ -337,16 +402,16 @@ scene.add(spill);
 
 const camBase = new THREE.Vector3(), camLook = new THREE.Vector3(0, 0.95, 0); // donde mira la cámara sobria
 function fit() {
+  if (!innerWidth || !innerHeight) return; // ventana sin tamaño (minimizada): espera al siguiente resize
   const aspect = innerWidth / innerHeight, tan = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
   const dist = Math.max(1.6 / tan, (x1 - x0) * 1.3 / 2 / (tan * aspect));
   camera.aspect = aspect; camera.position.set(0, 0.7, dist); camera.lookAt(camLook); camBase.copy(camera.position);
   camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); beach.setSize(innerWidth, innerHeight);
+  // el sol, justo en el centro de la pantalla (donde mira la cámara): al principio su resplandor esconde parte de la
+  // palabra, y la palabra se va descubriendo a medida que las letras se llenan de cerveza y se vuelven opacas
+  beach.setSun(Math.atan((camLook.y - 0.7) / dist), 0);
 }
 addEventListener('resize', fit); fit();
-{ // el sol asoma justo detrás de la H: su luz atraviesa el vidrio y se abre en colores
-  const d = camera.position.z, h = glasses[2];
-  beach.setSun(Math.atan(0.15 / d) + 0.01, Math.atan(-h.cx / d));
-}
 
 // ---- Interacción ----
 const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), p = new THREE.Vector3();
@@ -372,7 +437,15 @@ canvas.addEventListener('pointerup', () => drag = false);
 canvas.addEventListener('pointerleave', () => hover.set(1e3, 0, 0));
 
 // ---- Física: resortes (cap. 3) para posición, inclinación y flexión de la lata ----
-const vel = new THREE.Vector3(), poured = { beer: 0, foam: 0 };
+const vel = new THREE.Vector3(), poured = { beer: 0, foam: 0 }, push = new THREE.Vector3(), flyHome = new THREE.Vector3();
+const LIFT = 1 + CAN_H / 2 + 0.15; // altura de vuelo: la base pasa por encima de las letras
+let bumpAt = 0, perfects = 0, everPoured = false;
+// Dónde cae el chorro: sale por la boca en la dirección de la lata y la gravedad lo curva (la misma física del fluido).
+// La lata se inclina, y el vaso se calcula, según dónde cae, no según qué hay justo debajo de la boca.
+function landing(mx, my, tilt) {
+  const vx = -Math.sin(tilt) * POUR_SPEED, vy = Math.cos(tilt) * POUR_SPEED, drop = Math.max(0, my - 1);
+  return mx + vx * (vy + Math.sqrt(vy * vy + 2 * G * drop)) / G;
+}
 let tilt = 0, tiltV = 0, bendA = 0, bendV = 0, served = 0, drainAt = 0, lastReach = 0, fizz = 0, gulpAt = 0, splatAt = 0, landed = 0;
 // Cada cerveza que se toman suma: la borrachera (0..1) crece rápido al principio y cada vez más despacio
 let beers = 0, drunk = 0, drinking = false;
@@ -384,49 +457,92 @@ const spring = (x, v, goal, k, c, dt) => v + (k * (goal - x) - c * v) * dt;
 // Sin textos: el veredicto se ve en la letra. Plana o espumosa se queda así; perfecta destella y queda encendida.
 function evaluate(g, foam) {
   g.done = true;
-  if (grade(foam) === 'perfecta') { g.perfect = true; g.u.uShine.value = 2.5; acting.trigger('celebrar'); }
+  const verdict = grade(foam);
+  if (verdict === 'perfecta') { g.perfect = true; g.u.uShine.value = 2.5; acting.trigger('celebrar'); perfects++; }
+  else acting.trigger(verdict === 'plana' ? 'desinflarse' : 'uy'); // sin texto: la lata dice qué pasó
   sound.done(g.perfect, g.cx);
   if (++served === glasses.length) drainAt = clock.getElapsed() + 4; // la palabra servida se queda un rato y se vacía: otra ronda
+}
+
+// Resolución adaptable: si el equipo no sostiene ~45 cuadros por segundo, baja la densidad de píxeles un paso.
+// En un equipo que alcanza, no cambia nada.
+const PR_MIN = 0.75;
+let pixelRatio = renderer.getPixelRatio(), slow = 0;
+function adapt(raw) {
+  if (raw > 0.1) return; // pestaña en segundo plano o pausa: no cuenta
+  slow = raw > 1 / 45 ? slow + raw : Math.max(0, slow - raw / 4);
+  if (slow > 1.5 && pixelRatio > PR_MIN) {
+    pixelRatio = Math.max(PR_MIN, pixelRatio - 0.25); slow = 0;
+    renderer.setPixelRatio(pixelRatio); beach.setPixelRatio(pixelRatio); fit();
+  }
 }
 
 const clock = new THREE.Timer(), v2 = new THREE.Vector3();
 renderer.setAnimationLoop(time => {
   clock.update(time);
+  adapt(clock.getDelta());
   const dt = Math.min(clock.getDelta(), 1 / 30), t = clock.getElapsed();
-  const goal = drag ? target : home;
+  // suelta lejos de su sitio (o en lo alto), vuelve volando por encima de las letras y solo baja ya alineada con su hueco
+  const dx = Math.abs(pivot.position.x - home.x), high = pivot.position.y > home.y + 0.3;
+  const goal = drag ? target : dx < 0.04 || (dx < CAN_W / 2 && !high) ? home
+    : flyHome.set(pivot.position.y > LIFT - 0.2 ? home.x : pivot.position.x, LIFT, 0);
 
-  vel.addScaledVector(v2.subVectors(goal, pivot.position), 140 * dt).multiplyScalar(1 - 16 * dt);
-  pivot.position.addScaledVector(vel, dt);
+  vel.addScaledVector(v2.subVectors(goal, pivot.position), 140 * dt).multiplyScalar(1 - 16 * dt); // se mueve más abajo, en pasos cortos
 
-  const mx = goal.x - Math.sin(POUR_TILT) * CAN_H / 2, my = goal.y + Math.cos(POUR_TILT) * CAN_H / 2;
+  const c2 = Math.cos(POUR_TILT), s2 = Math.sin(POUR_TILT); // la boca si la lata estuviera inclinada para servir
+  const my = goal.y + mouthLocal.x * s2 + mouthLocal.y * c2, mx = landing(goal.x + mouthLocal.x * c2 - mouthLocal.y * s2, my, POUR_TILT);
   tiltV = spring(tilt, tiltV, drag && opened && overGlass(mx, my) ? POUR_TILT : 0, 60, 11, dt); tilt += tiltV * dt;
   pivot.rotation.z = tilt;
   bendV = spring(bendA, bendV, THREE.MathUtils.clamp(-vel.x * 0.12, -0.5, 0.5), 90, 7, dt); bendA += bendV * dt;
   // personalidad: cuando nadie la toca y está en su sitio, actúa (personaje.js)
-  const idle = !drag && Math.abs(tilt) < 0.3 && pivot.position.distanceTo(home) < 0.1;
+  const idle = !drag && Math.abs(tilt) < 0.3 && Math.abs(pivot.position.x - home.x) < 0.1 && pivot.position.y < home.y + 0.3; // en su sitio (puede estar apoyada en un borde)
   const empty = glasses.filter(g => !g.done).sort((a, b) => Math.abs(a.cx - home.x) - Math.abs(b.cx - home.x))[0];
   const act = acting.update({ t, dt, idle, opened, served, drunk, dir: empty ? Math.sign(empty.cx - home.x) : 0,
     near: THREE.MathUtils.clamp(1 - hover.distanceTo(pivot.position) / 0.9, 0, 1), toward: THREE.MathUtils.clamp((hover.x - pivot.position.x) / 0.6, -1, 1) });
-  actor.position.y = -CAN_H / 2 + act.y; actor.scale.set(1 - act.sq / 2, 1 + act.sq, 1 - act.sq / 2); actor.rotation.set(act.fwd, act.spin, act.lean);
-  bend(bendA + act.bend);
+  actor.position.y = -CAN_H / 2 + act.y; actor.scale.set(1 - act.sq / 2, 1 + act.sq, 1 - act.sq / 2);
+  const pose = k => { actor.rotation.set(act.fwd, act.spin, act.lean * k); bend((bendA + act.bend) * k); }; // k: cuánto de la inclinación de lado
+  pose(1);
+  const pushOut = () => { // el vidrio la empuja hacia afuera de su contorno; frena lo que iba contra él y, si venía fuerte, suena
+    for (let i = 0; i < 8; i++) {
+      const d = letterPush(push);
+      if (!d) return;
+      pivot.position.add(push);
+      const into = vel.dot(push) / d;
+      if (into < 0) { vel.addScaledVector(push, -into / d); if (into < -0.6 && t > bumpAt) { sound.bump(Math.min(1, -into / 3), pivot.position.x); bumpAt = t + 0.15; } }
+      readAxis();
+    }
+  };
+  // avanza en pasos de máximo 3 cm: así no atraviesa de un salto una pata delgada de la A o la H
+  const steps = Math.min(10, Math.ceil(vel.length() * dt / 0.03) || 1);
+  for (let i = 0; i < steps; i++) { pivot.position.addScaledVector(vel, dt / steps); readAxis(); if (!idle) pushOut(); }
+  if (idle && letterPush(push) > 0) { // en su sitio: si una inclinación la llevaría contra la letra vecina, se inclina solo hasta casi tocarla
+    let lo = 0, hi = 1;
+    for (let i = 0; i < 5; i++) { const m = (lo + hi) / 2; pose(m); readAxis(); if (letterPush(push) > 0) hi = m; else lo = m; }
+    pose(lo); readAxis(); pushOut(); // si ni derecha cabe (aplastón), se corre lo justo
+  }
+  const sink = -groundGap(); // la arena: el borde más bajo se apoya en ella y la lata gira sobre ese borde
+  if (sink > 0) { pivot.position.y += sink; if (vel.y < 0) vel.y = 0; readAxis(); }
   open += ((opened ? 1 : 0) - open) * Math.min(1, 8 * dt);
   opener.rotation.x = openerRest + open * OPEN_ANGLE + act.tab;
   lid.rotation.x = lidRest + Math.min(1, open * 1.5) * LID_ANGLE; // la tapa cede un poco antes de que la anilla llegue arriba
   opener.scale.setScalar(1 + 0.35 * open); // tilde un poco más grande para que se lea
 
   const pouring = opened && tilt > 1.6;
-  let fill = null, mouthX = pivot.position.x;
+  let fill = null, mouthX = pivot.position.x, glowing = -1;
   if (pouring) { // sale cerveza por la boca: la altura decide cuánta es espuma (modelo.js)
     pivot.updateMatrixWorld();
     const m = pivot.localToWorld(mouthLocal.clone()), out = emitir(poured, m.y - 1, dt, CAP);
-    const k = glasses.findIndex(g => m.x > g.x0 && m.x < g.x1); // dónde cae: el tono del vaso sube a medida que se llena
+    const lx = landing(m.x, m.y, tilt), k = glasses.findIndex(g => lx > g.x0 && lx < g.x1); // dónde cae: el tono del vaso sube a medida que se llena
     mouthX = m.x;
-    if (k >= 0) { fill = Math.min(1, (fluid.beer[k] + fluid.foam[k]) / fluid.cap[k]); fizz = Math.max(fizz, Math.min(1, 0.3 + 3 * fluid.foam[k] / fluid.cap[k])); }
+    if (k >= 0) {
+      fill = Math.min(1, (fluid.beer[k] + fluid.foam[k]) / fluid.cap[k]); fizz = Math.max(fizz, Math.min(1, 0.3 + 3 * fluid.foam[k] / fluid.cap[k]));
+      if (!glasses[k].done && sweet(m.y - 1)) glowing = k; // a la altura justa: el vaso que recibe se enciende
+    }
     const ax = -Math.sin(tilt), ay = Math.cos(tilt); // hacia donde apunta la boca
     const count = out.beer + out.foam;
     for (let k = 0; k < count; k++) { // repartidas a lo ancho del hueco y a lo largo de lo que avanza el chorro en este cuadro
       const side = (Math.random() - 0.5) * 0.05, along = 1.5 * dt * k / count;
-      fluid.emit(m.x - ay * side + ax * along, m.y + ax * side + ay * along, vel.x + ax * 1.5, vel.y + ay * 1.5, k >= out.beer);
+      fluid.emit(m.x - ay * side + ax * along, m.y + ax * side + ay * along, vel.x + ax * POUR_SPEED, vel.y + ay * POUR_SPEED, k >= out.beer);
     }
   }
 
@@ -465,7 +581,14 @@ renderer.setAnimationLoop(time => {
   camera.rotateZ(Math.sin(t * 0.6) * 0.06 * drunk);
   beach.setDrunk(drunk); sound.setDrunk(drunk);
 
+  // la guía de "aquí está bien" se va apagando a medida que la persona aprende (con cada servido perfecto)
+  const hint = Math.max(0.3, 1 - perfects / 4) * 0.55;
+  if (pouring) everPoured = true;
+  // antes del primer servido, las letras vacías respiran con un brillo tenue: "aquí se sirve"
+  const invite = opened && !everPoured && !drag ? 0.1 * (0.5 + 0.5 * Math.sin(t * 2.4)) : 0;
   glasses.forEach((g, k) => {
+    g.glow += ((k === glowing ? 1 : 0) - g.glow) * Math.min(1, 8 * dt);
+    g.glass.emissiveIntensity = Math.max(g.glow * hint * (0.85 + 0.15 * Math.sin(t * 14)), g.done ? 0 : invite);
     g.u.uTime.value = t;
     g.u.uShine.value += ((g.perfect ? 0.6 : 0) - g.u.uShine.value) * Math.min(1, 2 * dt);
     g.u.uFoamH.value += (fluid.foam[k] / fluid.cap[k] * g.h - g.u.uFoamH.value) * Math.min(1, 4 * dt); // grosor de la espuma
@@ -477,12 +600,13 @@ renderer.setAnimationLoop(time => {
     const inGlass = fluid.CUP[i] >= 0, vx = fluid.VX[i] / fluid.STEP, vy = fluid.VY[i] / fluid.STEP;
     const falling = Math.min(1, Math.max(0, (Math.hypot(vx, vy) - 0.5) / 1.5)); // el chorro sigue visible dentro del vaso hasta la superficie
     pos[i * 3] = fluid.X[i]; pos[i * 3 + 1] = fluid.Y[i];
-    kind[i * 3] = inGlass ? 1 - falling : 0; kind[i * 3 + 1] = inGlass ? 2.5 * falling : 0; kind[i * 3 + 2] = inGlass ? 0 : 1 - fluid.AGE[i] / fluid.SINK;
+    const loose = inGlass ? 0 : 1 - fluid.AGE[i] / fluid.SINK;
+    kind[i * 4] = inGlass ? 1 - falling : 0; kind[i * 4 + 1] = inGlass ? 2.5 * falling : 0; kind[i * 4 + 2] = loose; kind[i * 4 + 3] = fluid.FOAM[i] * loose;
     sv[i * 2] = vx; sv[i * 2 + 1] = vy;
   }
   splatGeo.setDrawRange(0, fluid.n);
   splatGeo.attributes.position.needsUpdate = splatGeo.attributes.kind.needsUpdate = splatGeo.attributes.vel.needsUpdate = true;
-  renderer.setRenderTarget(field); renderer.render(fieldScene, fieldCam);
+  renderer.setRenderTarget(field); renderer.setClearAlpha(0); renderer.render(fieldScene, fieldCam); renderer.setClearAlpha(1); // el alfa empieza vacío
   blur.material.uniforms.tMap.value = field.texture; blur.material.uniforms.uStep.value.set(2 / FIELD_W, 0);
   renderer.setRenderTarget(fieldTmp); blur.render(renderer);
   blur.material.uniforms.tMap.value = fieldTmp.texture; blur.material.uniforms.uStep.value.set(0, 2 / FIELD_H);

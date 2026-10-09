@@ -41,6 +41,12 @@ export const ACTIONS = {
   // la ola la asusta: brinca hacia arriba
   susto: { dur: 0.9, weight: 0, cues: [[0, 'boing'], [0.6, 'tink']],
     f: u => ({ y: hop(u, 0, 0.6, 0.22), sq: 0.15 * bump(u, 0, 0.2) - 0.12 * bump(u, 0.55, 0.78), spin: 0.25 * bump(u, 0, 0.6), tab: 0.3 * bump(u, 0, 0.6) }) },
+  // salió plana (casi sin espuma): se desinfla, se encorva y baja la anilla
+  desinflarse: { dur: 1.7, weight: 0, cues: [[0.08, 'wah']],
+    f: u => ({ sq: -0.13 * hold(u, 0.25), fwd: 0.16 * hold(u, 0.25), lean: 0.05 * Math.sin(u * Math.PI), tab: -0.25 * hold(u, 0.2) }) },
+  // salió espumosa (se pasó de espuma): se sacude como quien se salpicó
+  uy: { dur: 1.1, weight: 0, cues: [[0.04, 'squeak'], [0.62, 'tink']],
+    f: u => ({ lean: 0.13 * Math.sin(u * Math.PI * 7) * (1 - u), y: hop(u, 0, 0.3, 0.06), sq: 0.08 * bump(u, 0, 0.15) - 0.06 * bump(u, 0.28, 0.4), tab: 0.35 * bump(u, 0, 0.5) }) },
   // servido perfecto: pirueta con la anilla agitándose
   celebrar: { dur: 1.4, weight: 0, cues: [[0.2, 'boing'], [0.32, 'whoosh'], [0.78, 'tink']],
     f: u => ({ ...ACTIONS.pirueta.f(u), tab: 0.4 * Math.abs(Math.sin(u * Math.PI * 7)) }) },

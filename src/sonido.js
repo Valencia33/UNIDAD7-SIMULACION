@@ -186,6 +186,7 @@ export function createSound() {
       o.start(t); o.stop(t + 1.15);
       burst('bandpass', 1500, 900, 1, 0.03, { attack: 0.1 });         // el aire
     },
+    bump(strength, x) { clink(1500 + Math.random() * 400, { pan: x / 2, vol: 0.06 * strength }); }, // la lata choca contra el vidrio
     splat(n, x) { if (n) burst('lowpass', 900, 250, 0.12, Math.min(0.12, 0.012 * n), { pan: x / 2 }); },
     slosh() { burst('lowpass', 700, 240, 0.45, 0.08, { attack: 0.05 }); },
     // la voz de la lata
@@ -194,6 +195,7 @@ export function createSound() {
     whoosh() { burst('bandpass', 400, 1700, 0.35, 0.08, { attack: 0.08, Q: 1.2 }); },
     squeak() { tone(850, 1500, 0.28, 0.035, { attack: 0.05 }); },
     boop() { tone(520, 440, 0.12, 0.06, { type: 'triangle' }); },
+    wah() { tone(330, 262, 0.22, 0.06, { type: 'triangle' }); tone(262, 196, 0.4, 0.06, { type: 'triangle', delay: 0.22 }); }, // "wa-waa": salió plana
     tick() { tone(3000, 2900, 0.025, 0.025, { type: 'square' }); },
     hic() { tone(330, 620, 0.09, 0.08, { type: 'sawtooth', filters: [filter('bandpass', 1300, 2)] }); burst('highpass', 3000, 2000, 0.03, 0.05); },
   };

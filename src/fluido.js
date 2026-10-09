@@ -6,7 +6,7 @@
 export const STEP = 1 / 240;  // paso fijo de la simulación (s)
 export const H = 0.07;        // radio de interacción entre partículas (alturas de letra)
 export const AREA = 0.00085;  // área que ocupa una partícula en reposo: define cuántas llenan una letra
-const G = 25;                 // gravedad (alturas de letra / s²)
+export const G = 25;          // gravedad (alturas de letra / s²)
 const REST = 2.2, K = 0.008, K_NEAR = 0.02; // densidad de reposo, presión y presión cercana (tensión superficial)
 const SIGMA = 0.25;           // viscosidad
 export const MOUTH = 0.07;           // la boca del vaso: todo borde a menos de esta distancia de arriba está abierto (la B recibe también por lo alto de su curva)
@@ -15,6 +15,10 @@ const R_OUT = 0.004;          // por fuera es más delgada: así escurre por las
 const SINK = 1.6;             // segundos que dura la cerveza suelta quieta (charco, ranura) antes de filtrarse
 const VMAX = 0.06;            // velocidad máxima por paso, para que nada atraviese el vidrio
 const MAX = 4000;
+// Un vaso quieto se duerme: sus gotas dejan de calcularse hasta que algo lo toca (chorro, ola, trago).
+// Así el costo depende de lo que se mueve, no de cuánta cerveza hay servida.
+const SLEEP_V = 0.45;         // velocidad media (alturas de letra / s) bajo la cual el vaso se considera quieto
+const SLEEP_AFTER = 0.6;      // segundos quieto y sin recibir cerveza antes de dormirse
 
 // cups: [{ loops: [[{x, y}, ...], ...], top }]  (contorno exterior y huecos de cada letra)
 // bounds: { x0, x1, y0, y1 } región donde existe el fluido; lo que sale de ahí desaparece
@@ -24,6 +28,8 @@ export function createFluid(cups, bounds) {
   const FOAM = new Uint8Array(MAX), CUP = new Int8Array(MAX);
   const FRESH = new Uint8Array(MAX); // recién salida de la lata: cae sola, sin empujar ni pegarse, hasta que toca algo
   const beer = new Int32Array(cups.length), foam = new Int32Array(cups.length);
+  const awake = new Uint8Array(cups.length).fill(1), calm = new Float32Array(cups.length), entered = new Uint8Array(cups.length), speed2 = new Float32Array(cups.length);
+  const asleep = i => CUP[i] >= 0 && !awake[CUP[i]];
   let n = 0, acc = 0, landed = 0; // landed: gotas que acaban de caer a la arena (para el sonido)
 
   // ---- Campo de distancia con signo: negativo dentro de una letra, positivo fuera ----
@@ -103,14 +109,16 @@ export function createFluid(cups, bounds) {
   function step() {
     // 1. gravedad y predicción (velocidades en alturas de letra por paso)
     for (let i = 0; i < n; i++) {
+      if (asleep(i)) { PX[i] = X[i]; PY[i] = Y[i]; continue; }
       VY[i] -= G * STEP * STEP;
-      const v = Math.hypot(VX[i], VY[i]); if (v > VMAX) { VX[i] *= VMAX / v; VY[i] *= VMAX / v; }
+      const v2 = VX[i] * VX[i] + VY[i] * VY[i]; if (v2 > VMAX * VMAX) { const k = VMAX / Math.sqrt(v2); VX[i] *= k; VY[i] *= k; }
       PX[i] = X[i]; PY[i] = Y[i]; X[i] += VX[i]; Y[i] += VY[i];
     }
     // 2. relajación de doble densidad: presión (no se comprime), presión cercana (no se pega ni se apila)
     //    y viscosidad (frena a los vecinos que se acercan), todo como desplazamientos
     buildGrid();
     for (let i = 0; i < n; i++) {
+      if (asleep(i)) continue; // dormida: no empuja, pero sus vecinas despiertas sí la sienten
       const m = neighbors(i);
       if (FRESH[i]) { for (let k = 0; k < m; k++) if (NQ[k] > 0.5) { FRESH[i] = 0; break; } continue; } // el chorro llega al líquido
       let rho = 0, near = 0;
@@ -120,7 +128,8 @@ export function createFluid(cups, bounds) {
       for (let k = 0; k < m; k++) {
         const q = NQ[k], j = NB[k], u = (VX[i] - VX[j]) * NX[k] + (VY[i] - VY[j]) * NY[k];
         const D = (P * q + PN * q * q + (u > 0 ? SIGMA * q * u : 0)) * 0.5;
-        X[j] += D * NX[k]; Y[j] += D * NY[k]; dx -= D * NX[k]; dy -= D * NY[k];
+        if (!asleep(j)) { X[j] += D * NX[k]; Y[j] += D * NY[k]; }
+        dx -= D * NX[k]; dy -= D * NY[k];
       }
       X[i] += dx; Y[i] += dy;
     }
@@ -128,12 +137,13 @@ export function createFluid(cups, bounds) {
     beer.fill(0); foam.fill(0);
     for (let i = n - 1; i >= 0; i--) {
       let c = CUP[i];
+      if (asleep(i)) { (FOAM[i] ? foam : beer)[c]++; continue; }
       const s = sdf(X[i], Y[i]);
-      if (c < 0 && s < -(WALL + R)) { const k = cupAt(X[i], Y[i]); if (k >= 0) { CUP[i] = c = k; FRESH[i] = 0; } } // entró por la boca
+      if (c < 0 && s < -(WALL + R)) { const k = cupAt(X[i], Y[i]); if (k >= 0) { CUP[i] = c = k; FRESH[i] = 0; entered[k] = 1; awake[k] = 1; } } // entró por la boca: lo despierta
       if (c >= 0 && (Y[i] > cups[c].top || s > 0)) CUP[i] = c = -1; // salió por la boca: se rebosa
       const lim = c >= 0 ? -(WALL + R) : R_OUT;
       if (c >= 0 ? s > lim : s < lim) { // empuja fuera de la pared, en la dirección del campo
-        const e = CELL, gx = sdf(X[i] + e, Y[i]) - sdf(X[i] - e, Y[i]), gy = sdf(X[i], Y[i] + e) - sdf(X[i], Y[i] - e), g = Math.hypot(gx, gy) || 1;
+        const e = CELL, gx = sdf(X[i] + e, Y[i]) - sdf(X[i] - e, Y[i]), gy = sdf(X[i], Y[i] + e) - sdf(X[i], Y[i] - e), g = Math.sqrt(gx * gx + gy * gy) || 1;
         X[i] -= (s - lim) * gx / g; Y[i] -= (s - lim) * gy / g; FRESH[i] = 0;
       }
       if (Y[i] < R) { if (PY[i] > R + 0.004) landed++; Y[i] = R; X[i] = PX[i] + (X[i] - PX[i]) * 0.7; FRESH[i] = 0; } // arena: frena
@@ -142,11 +152,23 @@ export function createFluid(cups, bounds) {
       if (c >= 0) (FOAM[i] ? foam : beer)[c]++;
     }
     // 5. la velocidad es lo que de verdad se movió
-    for (let i = 0; i < n; i++) { VX[i] = X[i] - PX[i]; VY[i] = Y[i] - PY[i]; }
+    speed2.fill(0);
+    for (let i = 0; i < n; i++) {
+      VX[i] = X[i] - PX[i]; VY[i] = Y[i] - PY[i];
+      if (CUP[i] >= 0) speed2[CUP[i]] += VX[i] * VX[i] + VY[i] * VY[i];
+    }
+    // 6. dormir los vasos quietos
+    for (let c = 0; c < cups.length; c++) {
+      if (!awake[c]) continue;
+      const count = beer[c] + foam[c], quiet = !entered[c] && (!count || speed2[c] / count < (SLEEP_V * STEP) ** 2);
+      calm[c] = quiet ? calm[c] + STEP : 0;
+      if (calm[c] > SLEEP_AFTER) awake[c] = 0;
+    }
+    entered.fill(0);
   }
 
   return {
-    X, Y, VX, VY, FOAM, CUP, AGE, beer, foam, cap, SINK, STEP,
+    X, Y, VX, VY, FOAM, CUP, AGE, beer, foam, cap, awake, SINK, STEP,
     get n() { return n; },
     takeLanded() { const k = landed; landed = 0; return k; },
     emit(x, y, vx, vy, isFoam) { // velocidad en alturas de letra por segundo
@@ -155,7 +177,10 @@ export function createFluid(cups, bounds) {
       VX[n] = vx * STEP; VY[n] = vy * STEP; AGE[n] = 0; FOAM[n] = isFoam ? 1 : 0; CUP[n] = -1; FRESH[n] = 1; n++;
     },
     update(dt) { acc = Math.min(acc + dt, 8 * STEP); while (acc >= STEP) { step(); acc -= STEP; } },
-    kick(strength) { for (let i = 0; i < n; i++) if (CUP[i] >= 0) { VX[i] += (Math.random() - 0.5) * strength * STEP; VY[i] += strength * 0.5 * STEP; } },
+    kick(strength) { // la ola despierta todos los vasos
+      awake.fill(1); calm.fill(0);
+      for (let i = 0; i < n; i++) if (CUP[i] >= 0) { VX[i] += (Math.random() - 0.5) * strength * STEP; VY[i] += strength * 0.5 * STEP; }
+    },
     drain(c, count) { // se toma desde arriba; devuelve cuántas gotas se tomó
       const top = []; for (let i = 0; i < n; i++) if (CUP[i] === c) top.push(i);
       const gone = top.sort((a, b) => Y[b] - Y[a]).slice(0, count).sort((a, b) => b - a);

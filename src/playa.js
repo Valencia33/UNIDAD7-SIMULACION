@@ -3,8 +3,9 @@ import * as THREE from 'three';
 import { Sky } from 'three/addons/objects/Sky.js';
 import { Reflector } from 'three/addons/objects/Reflector.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { CopyShader } from 'three/addons/shaders/CopyShader.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { Pass, FullScreenQuad } from 'three/addons/postprocessing/Pass.js';
 import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
@@ -39,26 +40,47 @@ const NOISE = /* glsl */`
 // Mapa de desplazamiento del piso (alturas en unidades de la escena; p = (x, z) del mundo).
 // Mar: oleaje que crece mar adentro. Arena: lomas suaves y rizos del viento, plana donde están las letras y donde moja la ola.
 const HEIGHT = /* glsl */`
-  uniform float uTime, uShore;
+  uniform float uTime, uShore, uFront; uniform vec4 uFeet[8];
   float seaH(vec2 p){ float t = uTime;
     return .04*sin(p.y*2.2 + t*1.3 + sin(p.x*.4)) + .025*sin(p.x*1.7 - p.y*1.3 + t*1.7) + .012*noise(p*4. + t*.8) + .006*noise(p*11. - t*1.3); }
-  float sandH(vec2 p){
-    float dunes = (noise(p*.35) - .5)*.3 + (noise(p*.9 + 3.) - .5)*.1, ripples = .012*sin(p.y*9. + noise(p*1.3)*5.);
-    return (dunes + ripples) * smoothstep(.3, 1.6, abs(p.y));
-  }
+  float dunes(vec2 p){ return (noise(p*.35) - .5)*.3 + (noise(p*.9 + 3.) - .5)*.1; }
+  float ripples(vec2 p){ return .012*sin(p.y*9. + noise(p*1.3)*5.); }
   float shoreAt(float x){ return uShore + .15*(noise(vec2(x*.5, 0.)) - .5); }
-  float groundH(vec2 p){
+  // cuánto pesa la arena en este punto: nada junto a las letras ni en el mar
+  float sandW(vec2 p, float shore){ return smoothstep(.3, 1.6, abs(p.y)) * smoothstep(shore + .3, shore + 3., p.y) * (1. - smoothstep(shore + .05, shore - .25, p.y)); }
+  float groundHr(vec2 p, float rip){ // rip: 1 con rizos, 0 solo las lomas
     float shore = shoreAt(p.x);
-    float sand = sandH(p) * smoothstep(shore + .3, shore + 3., p.y);
     float sea = (2.5*seaH(p) + .06*sin(p.y*.8 + uTime*.9 + p.x*.1)) * smoothstep(shore, shore - 2., p.y) * smoothstep(-20., -12., p.y);
-    return mix(sand, sea, smoothstep(shore + .05, shore - .25, p.y));
-  }`;
+    return (dunes(p) + rip*ripples(p)) * sandW(p, shore) + sea * smoothstep(shore + .05, shore - .25, p.y);
+  }
+  // Grumos de arena contra la base de cada letra, adelante y atrás: el mismo piso, levantado en montoncitos irregulares
+  // pegados al vidrio que tapan parte de la letra. Solo donde la letra toca la arena (uFeet) y nunca dentro del vidrio.
+  float moundH(vec2 p){
+    float away = abs(p.y) - uFront; // distancia hacia afuera de la cara de la letra
+    if (away < -.004 || away > .32) return 0.;
+    float on = 0.;
+    for (int i = 0; i < 8; i++) { vec4 f = uFeet[i]; if (f.y > f.x) on = max(on, smoothstep(f.x - .05, f.x + .01, p.x) * smoothstep(f.y + .05, f.y - .01, p.x)); }
+    if (on == 0.) return 0.;
+    float reach = .12 + .14*noise(vec2(p.x*5., sign(p.y)*7.));         // hasta dónde llega el montón, distinto a lo largo
+    float fall = 1. - smoothstep(0., reach, away);                      // alto contra el vidrio y baja en pendiente suave, con la cima redonda
+    float drift = .35 + .65*noise(vec2(p.x*3.5 + 2., sign(p.y)*3.));    // montones más altos y más bajos a lo largo de la letra
+    float lumps = .6 + .4*noise(p*vec2(10., 13.)) + .15*noise(p*vec2(22., 26.)); // grumos redondos, sin picos
+    return on * .11 * fall * drift * lumps;
+  }
+  float groundH(vec2 p){ return groundHr(p, 1.) + moundH(p); }`;
 
-// Piso denso cerca de las letras y cada vez más ralo hacia el horizonte: el desplazamiento tiene detalle donde se ve
-function groundGeometry(N = 320, near = 16, far = 750) {
+// Piso con celdas muy finas donde las letras tocan la arena (ahí están los montoncitos), medianas hasta 16 unidades
+// y cada vez más ralas hacia el horizonte: el desplazamiento tiene detalle donde se ve.
+function groundGeometry(N = 440, near = 16, far = 750) {
   const g = new THREE.PlaneGeometry(2, 2, N, N), p = g.attributes.position;
-  const map = u => { const a = Math.abs(u); return Math.sign(u) * (a <= 0.75 ? a / 0.75 * near : near + (far - near) * ((a - 0.75) / 0.25) ** 3); };
-  for (let i = 0; i < p.count; i++) p.setXY(i, map(p.getX(i)), map(p.getY(i)));
+  const warp = (fine, cells) => u => { // fine: medio ancho de la zona fina; cells: fracción de celdas que se lleva
+    const a = Math.abs(u), s = Math.sign(u);
+    if (a <= cells) return s * a / cells * fine;
+    if (a <= cells + 0.3) return s * (fine + (a - cells) / 0.3 * (near - fine));
+    return s * (near + (far - near) * ((a - cells - 0.3) / (0.7 - cells)) ** 3);
+  };
+  const mx = warp(1.75, 0.45), mz = warp(0.6, 0.3); // la palabra mide ±1.5 de ancho; los montoncitos llegan a ±0.45 en z
+  for (let i = 0; i < p.count; i++) p.setXY(i, mx(p.getX(i)), mz(p.getY(i)));
   g.computeBoundingSphere();
   return g;
 }
@@ -69,16 +91,19 @@ const groundMat = new THREE.ShaderMaterial({
     uLetters: { value: [0, 1, 2, 3].map(() => new THREE.Vector2()) }, uCan: { value: new THREE.Vector4() }, uCanWake: { value: new THREE.Vector2(2.8, 2.6) },
     uFeet: { value: Array.from({ length: 8 }, () => new THREE.Vector4()) }, uGaps: { value: Array.from({ length: 4 }, () => new THREE.Vector3()) },
     uSunDir: { value: new THREE.Vector3() } }, // tReflect y textureMatrix los pone el Reflector
-  vertexShader: `uniform mat4 textureMatrix; varying vec3 vW; varying vec4 vRefl;
+  vertexShader: `uniform mat4 textureMatrix; varying vec3 vW; varying vec4 vRefl; varying vec2 vDune;
     ${NOISE}${HEIGHT}
     void main(){
       vec3 pos = position;
-      pos.z += groundH((modelMatrix*vec4(pos,1.)).xz); // el plano está acostado: su z local es la altura
+      vec2 q = (modelMatrix*vec4(pos,1.)).xz;
+      float h = groundHr(q, 0.);
+      pos.z += h + ripples(q) * sandW(q, shoreAt(q.x)) + moundH(q); // el plano está acostado: su z local es la altura
+      vDune = vec2(groundHr(q + vec2(.03, 0.), 0.), groundHr(q + vec2(0., .03), 0.)) - h; // pendiente de las lomas: varía lento, basta por vértice
       vec4 w = modelMatrix*vec4(pos,1.); vW = w.xyz; vRefl = textureMatrix*vec4(pos,1.);
       gl_Position = projectionMatrix*viewMatrix*w;
     }`,
-  fragmentShader: `uniform float uReach, uFront; uniform vec2 uLetters[4], uCanWake; uniform vec3 uSunDir, uGaps[4]; uniform vec4 uCan, uFeet[8];
-    uniform sampler2D tReflect; varying vec3 vW; varying vec4 vRefl;
+  fragmentShader: `uniform float uReach; uniform vec2 uLetters[4], uCanWake; uniform vec3 uSunDir, uGaps[4]; uniform vec4 uCan;
+    uniform sampler2D tReflect; varying vec3 vW; varying vec4 vRefl; varying vec2 vDune;
     ${NOISE}${HEIGHT}
     vec3 spectrum(float t){ return clamp(abs(fract(t + vec3(0., 2./3., 1./3.))*6. - 3.) - 1., 0., 1.); }
     vec3 haze(vec3 r){ return mix(vec3(1., .5, .25), vec3(.2, .32, .6), smoothstep(0., .35, r.y)); }
@@ -144,7 +169,12 @@ const groundMat = new THREE.ShaderMaterial({
 
       // arena: seca lejos del agua, oscura donde las olas la mojan, con lomas iluminadas a contraluz, rizos y cuarzo
       float wet = smoothstep(uShore + MAX_WET, uShore + MAX_WET - 1., z);
-      vec3 ns = normalize(vec3(groundH(p) - groundH(p + vec2(e, 0.)), e, groundH(p) - groundH(p + vec2(0., e))));
+      float rw = sandW(p, shore), r0 = ripples(p); // los rizos son finos: su pendiente va por píxel, sumada a la de las lomas
+      float m0 = moundH(p), em = .006; // los montoncitos también, con un paso más corto porque son chicos
+      vec2 dm = vec2(moundH(p + vec2(em, 0.)) - m0, moundH(p + vec2(0., em)) - m0) * (e / em);
+      vec3 ns = normalize(vec3(-(vDune.x + (ripples(p + vec2(e, 0.)) - r0)*rw + dm.x), e, -(vDune.y + (ripples(p + vec2(0., e)) - r0)*rw + dm.y)));
+      float pile = smoothstep(.002, .012, m0); // dónde hay montoncito (aunque sea su orilla)
+      wet *= 1. - pile;                        // sobresalen del agua: son arena seca y mate, sin reflejo
       float lit = .72 + .55*max(dot(ns, normalize(vec3(uSunDir.x, .35, uSunDir.z))), 0.) - .25*(1. - ns.y)*step(0., ns.z);
       vec3 sand = mix(vec3(.78, .58, .4), vec3(.42, .3, .2), wet) * (1. - noise(p*90.)*.07 - noise(p*6.)*.06) * lit;
       sand *= 1. - .05*sin(z*26. + noise(p*2.5)*7.);
@@ -154,7 +184,7 @@ const groundMat = new THREE.ShaderMaterial({
       sand = mix(sand, mirror(vec3(0, 1, 0), .03), wet * Fs * .35); // la arena mojada es un espejo opaco
 
       // lámina de agua: deja ver la arena con cáusticas debajo, y refleja todo encima
-      float sheet = smoothstep(edge, edge - .3, z);
+      float sheet = smoothstep(edge, edge - .3, z) * (1. - pile); // el agua que sube los rodea, no los cubre
       float wc = ridge(p*7. + uTime*.5) + .6*ridge(p*11. - uTime*.4);
       vec3 under = sand*vec3(.7, .85, .85) + wc*vec3(1., .9, .7)*.25;
       vec3 col = mix(sand, mix(under, refl, F), sheet);
@@ -177,10 +207,11 @@ const groundMat = new THREE.ShaderMaterial({
           vec2 L = uLetters[i] + vec2(-.12, .12)*dzf;   // la luz se abre a medida que se aleja de la letra
           float t = (p.x - L.x)/(L.y - L.x);
           float inside = smoothstep(-.05, .1, t) * smoothstep(1.05, .9, t);
-          col += spectrum(t*.85 + dzf*.25 + .04*sin(uTime*.5)) * inside * fade * (.35 + 1.6*caustic) * .9;
+          col += mix(vec3(1., .8, .55), spectrum(t*.85 + dzf*.25 + .04*sin(uTime*.5)), .7) * inside * fade * (.35 + 1.6*caustic) * .35;
         }
       }
 
+      col = mix(col, sand, pile * .85); // sobre los montoncitos: la misma arena del piso, sin espuma ni agua encima
       col = mix(sea, col, smoothstep(shore - .25, shore + .05, z));
       col = mix(col, haze(normalize(vec3(-V.x, .01, -V.z))), smoothstep(40., 500., length(vW - cameraPosition)));
       gl_FragColor = vec4(col, 1.);
@@ -193,7 +224,7 @@ const groundMat = new THREE.ShaderMaterial({
 // un poco distinto, así los bordes de cada rayo se abren en arcoíris como luz que pasa por un prisma.
 const RaysShader = {
   uniforms: { tDiffuse: { value: null }, uSun: { value: new THREE.Vector2(0.5, 0.5) }, uAspect: { value: 1 },
-    uIntensity: { value: 1 }, uThreshold: { value: 6 }, uCap: { value: 3 }, uMax: { value: 8 }, uSpread: { value: 0.08 } },
+    uIntensity: { value: 0.7 }, uThreshold: { value: 6 }, uCap: { value: 3 }, uMax: { value: 8 }, uSpread: { value: 0.04 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }`,
   fragmentShader: `uniform sampler2D tDiffuse; uniform vec2 uSun; uniform float uAspect, uIntensity, uThreshold, uCap, uMax, uSpread; varying vec2 vUv;
     vec2 rot(vec2 d, float a){ d.x *= uAspect; d = mat2(cos(a), sin(a), -sin(a), cos(a)) * d; d.x /= uAspect; return d; }
@@ -203,7 +234,7 @@ const RaysShader = {
     }
     float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233)))*43758.5453); }
     void main(){
-      vec3 base = min(texture2D(tDiffuse, vUv).rgb, vec3(uMax)), acc = vec3(0.); // el sol es enorme en HDR: se recorta
+      vec3 acc = vec3(0.);
       vec2 d = vUv - uSun, dr = rot(d, -uSpread), db = rot(d, uSpread);
       float w = 1., j = hash(vUv) / 32.;
       for (int i = 0; i < 32; i++) {
@@ -211,9 +242,46 @@ const RaysShader = {
         acc += vec3(bright(uSun + dr*m).r, bright(uSun + d*m).g, bright(uSun + db*m).b) * w;
         w *= .95;
       }
-      gl_FragColor = vec4(base + acc/32.*uIntensity, 1.);
+      gl_FragColor = vec4(acc/32.*uIntensity, 1.);
     }`,
 };
+// La escena se dibuja con antialiasing (MSAA) en su propio búfer y se copia una sola vez: así los pases de después
+// trabajan sobre búferes normales y no pagan la resolución del MSAA cada uno (a 1080p eso costaba más que los propios efectos)
+class ScenePass extends Pass {
+  constructor(scene, camera) {
+    super();
+    this.scene = scene; this.camera = camera;
+    this.rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 });
+    this.copy = new FullScreenQuad(new THREE.ShaderMaterial({ ...CopyShader, uniforms: THREE.UniformsUtils.clone(CopyShader.uniforms) }));
+    this.copy.material.uniforms.tDiffuse.value = this.rt.texture;
+  }
+  setSize(w, h) { this.rt.setSize(w, h); }
+  render(renderer, writeBuffer) {
+    renderer.setRenderTarget(this.rt); renderer.clear(); renderer.render(this.scene, this.camera);
+    renderer.setRenderTarget(writeBuffer); this.copy.render(renderer);
+  }
+}
+// Los rayos son borrosos por naturaleza: se calculan a media resolución (un cuarto del costo) y se suman a la imagen completa
+class RaysPass extends Pass {
+  constructor() {
+    super();
+    this.uniforms = THREE.UniformsUtils.clone(RaysShader.uniforms);
+    this.rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+    this.rays = new FullScreenQuad(new THREE.ShaderMaterial({ uniforms: this.uniforms, vertexShader: RaysShader.vertexShader, fragmentShader: RaysShader.fragmentShader }));
+    this.add = new FullScreenQuad(new THREE.ShaderMaterial({
+      uniforms: { tDiffuse: this.uniforms.tDiffuse, tRays: { value: this.rt.texture }, uMax: this.uniforms.uMax },
+      vertexShader: RaysShader.vertexShader,
+      fragmentShader: `uniform sampler2D tDiffuse, tRays; uniform float uMax; varying vec2 vUv;
+        void main(){ gl_FragColor = vec4(min(texture2D(tDiffuse, vUv).rgb, vec3(uMax)) + texture2D(tRays, vUv).rgb, 1.); }`, // el sol es enorme en HDR: se recorta
+    }));
+  }
+  setSize(w, h) { this.rt.setSize(Math.ceil(w / 2), Math.ceil(h / 2)); }
+  render(renderer, writeBuffer, readBuffer) {
+    this.uniforms.tDiffuse.value = readBuffer.texture;
+    renderer.setRenderTarget(this.rt); this.rays.render(renderer);
+    renderer.setRenderTarget(this.renderToScreen ? null : writeBuffer); this.add.render(renderer);
+  }
+}
 
 // Acabado final, ya en colores de pantalla: aberración cromática hacia los bordes, gradación (sombras hacia el azul
 // noche de la lata, luces hacia su amarillo), un poco más de contraste y saturación, viñeta y grano de película.
@@ -292,7 +360,7 @@ function createSpray(scene) {
 export function createBeach(scene, renderer, camera) {
   const sky = new Sky(); sky.scale.setScalar(1500);
   const su = sky.material.uniforms;
-  su.turbidity.value = 2.5; su.rayleigh.value = 3.5; su.mieCoefficient.value = 0.003; su.mieDirectionalG.value = 0.95;
+  su.turbidity.value = 2.5; su.rayleigh.value = 3.5; su.mieCoefficient.value = 0.002; su.mieDirectionalG.value = 0.985; // halo cerrado: no borra las letras
   su.cloudCoverage.value = 0.3; su.cloudDensity.value = 0.35;
 
   // El piso es un espejo (Reflector) con nuestro shader de mar y arena encima
@@ -307,6 +375,7 @@ export function createBeach(scene, renderer, camera) {
 
   // Sombras: una luz desde detrás y más alta que el sol real, para que las sombras lleguen hacia quien mira
   renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.shadowMap.autoUpdate = false; // se piden una vez por cuadro en render(): la profundidad de campo vuelve a dibujar la escena
   const sunLight = new THREE.DirectionalLight(0xffb36b, 2.2);
   sunLight.position.set(0.8, 3, -7); sunLight.castShadow = true;
   Object.assign(sunLight.shadow.camera, { left: -4, right: 4, top: 4, bottom: -4, near: 1, far: 20 });
@@ -314,11 +383,11 @@ export function createBeach(scene, renderer, camera) {
   sunLight.shadow.mapSize.set(2048, 2048); sunLight.shadow.radius = 4; sunLight.shadow.bias = -0.0005; sunLight.shadow.normalBias = 0.02;
   const catcherMat = new THREE.ShadowMaterial({ color: 0x3a1d06, opacity: 0.5 }); // sombra ámbar: la luz pasa por vidrio color cerveza
   catcherMat.onBeforeCompile = s => { // la sombra sigue las mismas lomas del piso
-    Object.assign(s.uniforms, { uTime: groundMat.uniforms.uTime, uShore: groundMat.uniforms.uShore });
+    Object.assign(s.uniforms, { uTime: groundMat.uniforms.uTime, uShore: groundMat.uniforms.uShore, uFront: groundMat.uniforms.uFront, uFeet: groundMat.uniforms.uFeet });
     s.vertexShader = s.vertexShader.replace('void main() {', `${NOISE}${HEIGHT}\nvoid main() {`)
       .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y += groundH((modelMatrix*vec4(transformed, 1.)).xz);');
   };
-  const catcher = new THREE.Mesh(new THREE.PlaneGeometry(40, 40, 200, 200).rotateX(-Math.PI / 2), catcherMat);
+  const catcher = new THREE.Mesh(groundGeometry(220, 6, 20).rotateX(-Math.PI / 2), catcherMat); // fina donde están los montoncitos, como el piso
   catcher.position.y = 0.003; catcher.receiveShadow = true;
   scene.add(sunLight, catcher);
 
@@ -329,6 +398,7 @@ export function createBeach(scene, renderer, camera) {
   function setSun(elevation, azimuth = 0) { // radianes; el sol queda detrás de las letras (−z)
     sunDir.setFromSphericalCoords(1, Math.PI / 2 - elevation, Math.PI + azimuth);
     su.sunPosition.value.copy(sunDir); groundMat.uniforms.uSunDir.value.copy(sunDir);
+    sunLight.position.set(7 * sunDir.x / Math.max(-sunDir.z, 0.1), 3, -7); // las sombras caen del lado contrario al sol
     envScene.add(sky); // el cielo también ilumina y se refleja en el vidrio y la lata
     scene.environment?.dispose();
     scene.environment = pmrem.fromScene(envScene, 0, 0.1, 3000).texture;
@@ -337,10 +407,10 @@ export function createBeach(scene, renderer, camera) {
 
   const spray = createSpray(scene);
 
-  // Posprocesado: escena con antialiasing (MSAA) → profundidad de campo enfocada en la palabra → rayos de sol →
+  // Posprocesado: escena con antialiasing (MSAA, solo ella) → profundidad de campo enfocada en la palabra → rayos de sol →
   // resplandor (bloom) → tono de película (OutputPass) → acabado final
-  const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: 4 }));
-  composer.addPass(new RenderPass(scene, camera));
+  const composer = new EffectComposer(renderer, new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType }));
+  composer.addPass(new ScenePass(scene, camera));
   const bokeh = new BokehPass(scene, camera, { focus: 8, aperture: 0.0012, maxblur: 0.004 });
   const bokehRender = bokeh.render.bind(bokeh), hidden = [];
   bokeh.render = (...a) => { // lo transparente (chorro, salpicaduras) no debe tapar la profundidad de lo que hay detrás
@@ -349,11 +419,12 @@ export function createBeach(scene, renderer, camera) {
     while (hidden.length) hidden.pop().visible = true;
   };
   composer.addPass(bokeh);
-  const rays = new ShaderPass(RaysShader); composer.addPass(rays);
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(256, 256), 0.12, 0.4, 2.5)); // suave: solo destellos y lo más brillante
+  const rays = new RaysPass(); composer.addPass(rays);
+  const bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.12, 0.4, 2.5); // suave: solo destellos y lo más brillante
+  bloom.setSize = (w, h) => UnrealBloomPass.prototype.setSize.call(bloom, w / 2, h / 2); // es un resplandor difuso: media resolución basta
+  composer.addPass(bloom);
   composer.addPass(new OutputPass());
   const grade = new ShaderPass(GradeShader); composer.addPass(grade);
-  // ponytail: los rayos se calculan a resolución completa; si va lento en portátiles, pásalos a media resolución.
 
   const sp = new THREE.Vector3(), focus = new THREE.Vector3(0, 0.6, 0);
   let feet = [], front = 0.14, lastEdge = -Infinity, lastT = 0;
@@ -373,6 +444,7 @@ export function createBeach(scene, renderer, camera) {
     },
     setCan(cx, r, standing) { can.set(cx, r, standing ? 1 : 0, 0); }, // la lata en su sitio también frena el agua
     setDrunk(k) { grade.uniforms.uDrunk.value = k; bokeh.uniforms.aperture.value = 0.0012 * (1 + 3 * k); }, // borracho: también desenfoca más
+    setPixelRatio(pr) { composer.setPixelRatio(pr); },
     setSize(w, h) {
       composer.setSize(w, h); rays.uniforms.uAspect.value = grade.uniforms.uAspect.value = w / h;
       const r = renderer.getPixelRatio() / 2; ground.getRenderTarget().setSize(Math.round(w * r), Math.round(h * r));
@@ -393,6 +465,7 @@ export function createBeach(scene, renderer, camera) {
       bokeh.uniforms.focus.value = camera.position.distanceTo(focus);
       sp.copy(sunDir).multiplyScalar(1000).add(camera.position).project(camera);
       rays.uniforms.uSun.value.set((sp.x + 1) / 2, (sp.y + 1) / 2);
+      renderer.shadowMap.needsUpdate = true;
       composer.render();
     },
   };
