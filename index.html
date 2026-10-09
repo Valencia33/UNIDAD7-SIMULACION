@@ -4,46 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>BAHÍA — Servida como se merece</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Anton&family=Oswald:wght@300;400;600&display=swap" rel="stylesheet">
   <style>
-    /* Estilo de la lata: azul noche, amarillo sol, ocre, tipografía condensada y el sol con rayos */
-    :root { --navy: #14163b; --sun: #ffd400; --ochre: #b6862c; --white: #eeeeec; }
-    html, body { margin: 0; height: 100%; background: var(--navy); overflow: hidden; color: var(--white); font-family: Oswald, 'Arial Narrow', sans-serif; }
+    /* Sin textos en pantalla: la palabra, la lata y lo que hace la persona cuentan todo */
+    html, body { margin: 0; height: 100%; background: #14163b; overflow: hidden; }
     canvas { display: block; touch-action: none; }
-    #hint { position: absolute; bottom: 28px; width: 100%; text-align: center; font-weight: 400; font-size: 13px; letter-spacing: .24em; text-transform: uppercase; text-shadow: 0 1px 8px #0009; pointer-events: none; transition: opacity .6s; }
-    #hint::before { content: ''; display: inline-block; width: 8px; height: 8px; margin-right: 10px; border-radius: 50%; background: var(--sun); box-shadow: 0 0 10px var(--sun); vertical-align: 1px; }
-    #note { position: absolute; transform: translateX(-50%); width: min(460px, 90vw); text-align: center; font-weight: 300; font-size: 24px; line-height: 1.15; text-transform: uppercase; text-shadow: 0 1px 10px #000b; pointer-events: none; opacity: 0; transition: opacity .6s; }
-    #note b { display: block; margin-bottom: 4px; font-weight: 600; font-size: 11px; letter-spacing: .26em; color: var(--sun); }
-    /* arriba el titular, abajo el puntaje: la palabra servida queda libre en el medio */
-    #end { position: absolute; inset: 0; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: space-between; padding: 7vh 16px 14px; text-align: center;
-      background: linear-gradient(#14163bf2 0 22%, #14163b00 42% 62%, #14163bf0 92%); opacity: 0; pointer-events: none; transition: opacity 1.2s; }
-    #end .foot { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-    #end::before { content: ''; position: absolute; top: 0; left: 50%; width: 160vmax; height: 160vmax; transform: translate(-50%, -50%); pointer-events: none;
-      background: repeating-conic-gradient(#ffd4002e 0 .5deg, transparent .5deg 4deg);
-      -webkit-mask: radial-gradient(closest-side, #000 12%, transparent 45%); mask: radial-gradient(closest-side, #000 12%, transparent 45%); }
-    #end.on { opacity: 1; pointer-events: auto; }
-    #end > * { position: relative; }
-    #end h1 { margin: 0; font: 400 clamp(26px, min(6.5vw, 8vh), 76px)/1 Anton, Impact, sans-serif; text-transform: uppercase; letter-spacing: .01em; }
-    #end h1 span { color: var(--sun); }
-    #end p { margin: 4px 0; font-size: 15px; letter-spacing: .2em; text-transform: uppercase; opacity: .9; }
-    #end button { padding: 12px 28px; background: var(--sun); border: 0; border-radius: 2px; color: var(--navy); font: 600 14px Oswald, sans-serif; letter-spacing: .2em; text-transform: uppercase; cursor: pointer; }
-    #end button:hover, #end button:focus-visible { background: var(--white); outline: none; }
-    #end small { margin-top: 6px; font-weight: 300; font-size: 13px; letter-spacing: .06em; text-transform: uppercase; text-shadow: 0 1px 6px #000b; }
   </style>
 </head>
 <body>
-  <div id="hint">Cargando…</div>
-  <div id="note"></div>
-  <div id="end">
-    <h1>La calidad ya estaba.<br><span>Solo faltaba servirla como premium.</span></h1>
-    <div class="foot">
-      <p id="score"></p>
-      <button id="again">Otra ronda</button>
-      <small>El exceso de alcohol es perjudicial para la salud. Prohíbase el expendio de bebidas embriagantes a menores de edad.</small>
-    </div>
-  </div>
   <script type="module" src="/src/bahia.js"></script>
 </body>
 </html>

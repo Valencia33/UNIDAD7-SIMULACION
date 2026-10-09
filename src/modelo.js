@@ -19,6 +19,16 @@ export function pour(g, h, dt) {
   return g.level + g.foam >= FULL;
 }
 
+// La misma regla contada en gotas del fluido: cuántas partículas de cerveza y de espuma salen de la lata
+// en este paso. cap = partículas que llenan un vaso. acc guarda las fracciones de gota entre pasos.
+export function emitir(acc, h, dt, cap) {
+  const s = foamShare(h), dv = POUR_RATE * dt * cap;
+  acc.beer += dv * (1 - s); acc.foam += dv * s * FOAM_EXPANSION;
+  const out = { beer: Math.floor(acc.beer), foam: Math.floor(acc.foam) };
+  acc.beer -= out.beer; acc.foam -= out.foam;
+  return out;
+}
+
 export function grade(foam) {
   const fingers = foam / FINGER;
   return fingers < PERFECT[0] ? 'plana' : fingers > PERFECT[1] ? 'espumosa' : 'perfecta';
